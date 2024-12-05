@@ -28,11 +28,11 @@
 
 // FTP Response Codes
 enum FTPResponse {
-    SV_READY_PASS = 331,
-    SV_READY_AUTH = 220,
+    SV_READY4PASS = 331,
+    SV_READY4AUTH = 220,
     SV_LOGINSUCCESS = 230,
     SV_PASSIVE = 227,
-    SV_READY_TRANSFER = 150,
+    SV_READY4TRANSFER = 150,
     SV_TRANSFER_COMPLETE = 226,
     SV_GOODBYE = 221
 };
@@ -56,5 +56,6 @@ int sendFTPCommand(int socket, const char *command, char *response);
 int requestFile(int controlSocket, const char *resource);
 int downloadFile(int controlSocket, int dataSocket, const char *filename);
 int closeFTPConnections(int controlSocket, int dataSocket);
+int readResponse(const int socket, char *buffer);
 
-#endif // DOWNLOAD_H
+#endif 
