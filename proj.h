@@ -51,7 +51,8 @@ typedef struct {
 int parseURL(const char *input, URL *url);
 int createSocket(const char *ip, int port);
 int authenticate(int controlSocket, const char *user, const char *password);
-int enterPassiveMode(int controlSocket, char *ip, int *port);
+int enterPassiveMode(int controlSocket, char *ip, int *port, const char *controlIP);
+int isPrivateIP(const char *ip);
 int sendFTPCommand(int socket, const char *command, char *response);
 int requestFile(int controlSocket, const char *resource);
 int downloadFile(int controlSocket, int dataSocket, const char *filename);

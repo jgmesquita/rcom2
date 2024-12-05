@@ -73,14 +73,74 @@ int authenticate(int controlSocket, const char *user, const char *password) {
 /**
  * Enters passive mode and retrieves the IP and port for the data connection.
  */
-int enterPassiveMode(int controlSocket, char *ip, int *port) {
+int enterPassiveMode(int controlSocket, char *ip, int *port, const char *controlIP) {
     char response[MAX_LENGTH];
-    if (sendFTPCommand(controlSocket, "PASV\r\n", response) != SV_PASSIVE) return -1;
+    if (sendFTPCommand(controlSocket, "PASV\r\n", response) != SV_PASSIVE) {
+        fprintf(stderr, "Failed to enter passive mode.\n");
+        return -1;
+    }
 
-    int ip1, ip2, ip3, ip4, p1, p2;
-    sscanf(response, PASSIVE_REGEX, &ip1, &ip2, &ip3, &ip4, &p1, &p2);
-    sprintf(ip, "%d.%d.%d.%d", ip1, ip2, ip3, ip4);
-    *port = p1 * 256 + p2;
+    // Print the PASV response
+    printf("PASV response: %s\n", response);
+
+    // Find the starting position of the numbers
+    char *start = strchr(response, '(');
+    char *end = strchr(response, ')');
+    if (!start || !end || start > end) {
+        fprintf(stderr, "Malformed PASV response.\n");
+        return -1;
+    }
+
+    // Extract the string within parentheses
+    char nums[100];
+    strncpy(nums, start + 1, end - start - 1);
+    nums[end - start - 1] = '\0';
+
+    // Tokenize the numbers
+    int h1, h2, h3, h4, p1, p2;
+    if (sscanf(nums, "%d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
+        fprintf(stderr, "Could not parse PASV response numbers.\n");
+        return -1;
+    }
+
+    // Build the IP address
+    sprintf(ip, "%d.%d.%d.%d", h1, h2, h3, h4);
+
+    // Calculate the port
+    *port = (p1 << 8) | p2;
+
+    // Debug output
+    printf("Parsed IP: %s\n", ip);
+    printf("Parsed port: %d\n", *port);
+
+    // If IP is private, use control IP
+    if (isPrivateIP(ip)) {
+        printf("Using control connection IP instead of private PASV IP\n");
+        strcpy(ip, controlIP);
+    }
+
+    return 0;
+}
+
+int isPrivateIP(const char *ip) {
+    struct in_addr addr;
+    if (inet_aton(ip, &addr) == 0) {
+        return 0; // Invalid IP
+    }
+
+    uint32_t ip_addr = ntohl(addr.s_addr);
+
+    // 10.0.0.0 - 10.255.255.255
+    if ((ip_addr & 0xFF000000) == 0x0A000000) return 1;
+
+    // 172.16.0.0 - 172.31.255.255
+    if ((ip_addr & 0xFFF00000) == 0xAC100000) return 1;
+
+    // 192.168.0.0 - 192.168.255.255
+    if ((ip_addr & 0xFFFF0000) == 0xC0A80000) return 1;
+
+    // 127.0.0.0 - 127.255.255.255 (Loopback)
+    if ((ip_addr & 0xFF000000) == 0x7F000000) return 1;
 
     return 0;
 }
@@ -90,7 +150,10 @@ int enterPassiveMode(int controlSocket, char *ip, int *port) {
  */
 int sendFTPCommand(int socket, const char *command, char *response) {
     if (command != NULL) {
-        write(socket, command, strlen(command));
+        if (write(socket, command, strlen(command)) < 0) {
+            perror("write()");
+            return -1;
+        }
     }
     return readResponse(socket, response);
 }
@@ -135,43 +198,65 @@ int closeFTPConnections(int controlSocket, int dataSocket) {
 /**
  * Reads the server's response and extracts the response code.
  */
-int readResponse(const int socket, char *buffer) {
-    char byte;
-    int index = 0, responseCode;
-    enum { START, SINGLE, MULTIPLE, END } state = START;
+int readResponse(int sockfd, char *buffer) {
+    char line[MAX_LENGTH];
+    int code = 0;
+    int multi_line = 0;
 
-    memset(buffer, 0, MAX_LENGTH);
+    if (buffer != NULL) {
+        memset(buffer, 0, MAX_LENGTH);
+    }
 
-    while (state != END) {
-        if (read(socket, &byte, 1) <= 0) {
-            perror("read()");
-            exit(EXIT_FAILURE);
+    while (1) {
+        // Read a line
+        int bytes = 0;
+        char c;
+        int index = 0;
+        while (1) {
+            if ((bytes = read(sockfd, &c, 1)) <= 0) {
+                perror("read()");
+                exit(EXIT_FAILURE);
+            }
+            if (c == '\r') continue;
+            if (c == '\n') break;
+            if (index < MAX_LENGTH - 1) {
+                line[index++] = c;
+            }
+        }
+        line[index] = '\0';
+
+        // Append the line to buffer if buffer is not NULL
+        if (buffer != NULL) {
+            strncat(buffer, line, MAX_LENGTH - strlen(buffer) - 1);
+            strncat(buffer, "\n", MAX_LENGTH - strlen(buffer) - 1);
         }
 
-        switch (state) {
-            case START:
-                if (byte == ' ') state = SINGLE;
-                else if (byte == '-') state = MULTIPLE;
-                else if (byte == '\n') state = END;
-                else buffer[index++] = byte;
-                break;
-            case SINGLE:
-                if (byte == '\n') state = END;
-                else buffer[index++] = byte;
-                break;
-            case MULTIPLE:
-                if (byte == '\n' && index >= 3 && 
-                    strncmp(buffer, buffer + index - 3, 3) == 0) {
-                    state = END;
-                } else buffer[index++] = byte;
-                break;
-            case END:
-                break;
+        // Parse the code
+        int n;
+        if (sscanf(line, "%d", &n) == 1) {
+            if (code == 0) {
+                code = n;
+                // Check if it's a multi-line response
+                if (strlen(line) >= 4 && line[3] == '-') {
+                    multi_line = 1;
+                } else {
+                    break;
+                }
+            } else {
+                // Check if multi-line response is ending
+                if (multi_line && n == code && strlen(line) >= 4 && line[3] == ' ') {
+                    break;
+                }
+            }
+        }
+
+        if (!multi_line) {
+            // Single-line response; exit loop
+            break;
         }
     }
 
-    sscanf(buffer, "%d", &responseCode);
-    return responseCode;
+    return code;
 }
 
 int main(int argc, char *argv[]) {
@@ -219,7 +304,7 @@ int main(int argc, char *argv[]) {
     // Enter passive mode
     char dataIP[MAX_LENGTH];
     int dataPort;
-    if (enterPassiveMode(controlSocket, dataIP, &dataPort) != 0) {
+    if (enterPassiveMode(controlSocket, dataIP, &dataPort, url.ip) != 0) {
         fprintf(stderr, "Failed to enter passive mode.\n");
         close(controlSocket);
         return EXIT_FAILURE;
@@ -228,6 +313,7 @@ int main(int argc, char *argv[]) {
 
     // Connect to the data connection
     int dataSocket = createSocket(dataIP, dataPort);
+    printf("Data socket created: %d\n", dataSocket); // Debug statement
     if (dataSocket < 0) {
         fprintf(stderr, "Failed to establish data connection to %s:%d\n", dataIP, dataPort);
         close(controlSocket);
@@ -235,7 +321,9 @@ int main(int argc, char *argv[]) {
     }
 
     // Request the file from the server
-    if (requestFile(controlSocket, url.resource) != SV_READY4TRANSFER) {
+    int requestResult = requestFile(controlSocket, url.resource);
+    printf("File request result: %d\n", requestResult); // Debug statement
+    if (requestResult != SV_READY4TRANSFER) {
         fprintf(stderr, "Failed to request file '%s'.\n", url.resource);
         close(controlSocket);
         close(dataSocket);
@@ -244,14 +332,15 @@ int main(int argc, char *argv[]) {
     printf("File request successful. Beginning download...\n");
 
     // Download the file
-    if (downloadFile(controlSocket, dataSocket, url.file) != SV_TRANSFER_COMPLETE) {
+    int downloadResult = downloadFile(controlSocket, dataSocket, url.file);
+    printf("Download result: %d\n", downloadResult); // Debug statement
+    if (downloadResult != SV_TRANSFER_COMPLETE) {
         fprintf(stderr, "Error downloading file '%s'.\n", url.file);
         close(controlSocket);
         close(dataSocket);
         return EXIT_FAILURE;
     }
-    printf("File '%s' downloaded successfully.\n", url.file);
-
+    printf("File '%s' downloaded successfully.\n");
     // Close connections
     if (closeFTPConnections(controlSocket, dataSocket) != 0) {
         fprintf(stderr, "Error closing connections.\n");
